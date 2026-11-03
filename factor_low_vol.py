@@ -40,7 +40,7 @@ def run_low_vol_factor(tickers, inicio_in_sample, fim_in_sample, fim_out_of_samp
     print("3. Testando o portfólio no mundo real (Out-of-Sample)...")
     
     # Isola os retornos apenas das 10 ações selecionadas no período de teste
-    retornos_carteira_oos = retornos_out_of_sample[carteira_selecionada]
+    retornos_carteira_oos = retornos_out_of_sample[git add ap_2.pycarteira_selecionada]
     
     # Calcula o retorno diário do portfólio (Pesos iguais = 10% para cada ação)
     retorno_diario_portfolio = retornos_carteira_oos.mean(axis=1)
