@@ -80,7 +80,7 @@ def carregar_universo():
 F1_ANOS = list(range(2017, 2024))                                     # 2017, 2018, ..., 2023
 F1_PESOS = {"graduacao": 1, "mba": 1, "mestrado": 2, "doutorado": 3}  # pontos de cada nível de formação
 F1_TOP_N = 10                                                         # quantas empresas mostrar no terminal
-F1_NOTA_MINIMA = 4.0                                                  # corte decidido pelo grupo (8 empresas)
+F1_N_SELECAO = 10                                                  # corte decidido pelo grupo (8 empresas)
 F1_ARQ_AJUSTES = "ajustes_manuais.csv"                                # correções feitas à mão (opcional)
 F1_PASTA_ZIPS = Path("dados_cvm")                                     # onde ficam os arquivos baixados
 F1_SAIDA = PASTA_OUTPUTS / "fator1_ranking_escolaridade_ceo.xlsx"
@@ -293,11 +293,10 @@ def rodar_fator1(ibov):
         doutorado=("doutorado", "max"), nota_pessoa=("nota_pessoa", "max")).reset_index()
     revisar = ceos_por_empresa[ceos_por_empresa["nota_pessoa"] == 0]
 
-    # --- 7. seleção da carteira: empresas válidas com nota >= 4,0 (decisão do grupo)
-    #        Empresa com dois tickers (ex.: PETR3 e PETR4) entra com um só, o de TICKER_PRINCIPAL.
-    selecionadas = ranking[ranking["valida"] & (ranking["nota"] >= F1_NOTA_MINIMA)].copy()
+    # --- 7. seleção da carteira: as 10 maiores notas entre as empresas válidas (mesmo número dos Fatores 2 e 3)    #        Empresa com dois tickers (ex.: PETR3 e PETR4) entra com um só, o de TICKER_PRINCIPAL.
+    selecionadas = ranking[ranking["valida"]].sort_values("posicao").head(F1_N_SELECAO).copy()
     selecionadas["ticker_carteira"] = [TICKER_PRINCIPAL.get(emp, t.split(", ")[0])
-                                       for emp, t in zip(selecionadas.index, selecionadas["ticker"])]
+        for emp, t in zip(selecionadas.index, selecionadas["ticker"])]
 
     # --- 8. gravar os resultados
     with pd.ExcelWriter(F1_SAIDA) as arquivo:
@@ -309,7 +308,7 @@ def rodar_fator1(ibov):
 
     print(f"\nTop {F1_TOP_N} (critério 2017-2023, Ibovespa jan/2024):")
     print(ranking.head(F1_TOP_N)[["posicao", "ticker", "nota", "n_anos"]].to_string())
-    print(f"\nSelecionadas (nota >= {F1_NOTA_MINIMA}): {len(selecionadas)} -> {selecionadas['ticker_carteira'].tolist()}")
+    print(f"\nSelecionadas (top {F1_N_SELECAO}): {len(selecionadas)} -> {selecionadas['ticker_carteira'].tolist()}")
     print(f"Arquivos gerados: {F1_SAIDA} e {PASTA_OUTPUTS / 'fator1_selecionadas.csv'}")
     return selecionadas["ticker_carteira"].tolist()
 
@@ -881,6 +880,7 @@ TICKER_NOVO_YAHOO = {
     "ELET6": "AXIA6",
     "CPLE6": "CPLE3",   # Copel unificou as classes de ações; o CPLE6 deixou de ter cotação no Yahoo
     "MRFG3": "MBRF3",   # Marfrig incorporou a BRF em 2025 e passou a negociar como MBRF3
+    "TRPL4": "ISAE4",   # ISA CTEEP virou ISA Energia Brasil e mudou de ticker
 }
 
 
