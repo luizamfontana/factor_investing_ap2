@@ -82,6 +82,14 @@ def sharpe(serie):
     r = serie.pct_change().dropna()
     return (r.mean() * DIAS_ANO) / (r.std() * np.sqrt(DIAS_ANO))
 
+   
+def drawdown(serie):
+    """Queda percentual em relação ao maior valor atingido até cada dia."""
+    return serie / serie.cummax() - 1
+
+def drawdown_maximo(serie):
+    return drawdown(serie).min()
+
 
 # ----------------------------------------------------------------------
 # 6) EXECUÇÃO
@@ -115,12 +123,17 @@ def main():
             "Retorno acumulado": retorno_acumulado(s),
             "Volatilidade anualizada": volatilidade_anual(s),
             "Sharpe": sharpe(s),
+            "Drawdown máximo": drawdown_maximo(s),
         }
     tabela = pd.DataFrame(linhas)
     print("\n", tabela.round(4))
 
     tabela.to_csv("resultados.csv")
     pd.DataFrame(series).to_csv("evolucao_carteiras.csv")
+
+    print("\nDatas do pior drawdown (vale):")
+    for nome, s in series.items():
+        print(nome, drawdown(s).idxmin().date(), f"{drawdown_maximo(s):.2%}")
 
     import matplotlib
     matplotlib.use("Agg")
@@ -129,6 +142,18 @@ def main():
     plt.ylabel("Valor da carteira")
     plt.tight_layout()
     plt.savefig("grafico.png", dpi=150)
+
+    pd.DataFrame({n: drawdown(s) for n, s in series.items()}).plot(figsize=(10, 5), title="Drawdown: carteiras vs Ibovespa")
+    plt.ylabel("Queda em relação ao pico")
+    plt.tight_layout()
+    plt.savefig("drawdown.png", dpi=150)
+
+    dd = pd.DataFrame({n: drawdown(s) for n, s in series.items()})
+    dd[["Fator 1", "Ibovespa"]].plot(figsize=(10, 5), title="Drawdown: Fator 1 vs Ibovespa")
+    plt.xlabel("")
+    plt.ylabel("Queda em relação ao pico")
+    plt.tight_layout()
+    plt.savefig("drawdown_fator1.png", dpi=150)
 
 
 if __name__ == "__main__":
