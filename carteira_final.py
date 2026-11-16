@@ -20,10 +20,9 @@ COMO RODAR (na pasta do projeto, no VS Code)
 ONDE FICAM OS RESULTADOS
   outputs/      -> resultados de cada fator (o nome do arquivo começa com fator1_, fator2_ ou fator3_)
   pasta raiz    -> resultados da carteira final (carteira_*.csv e carteira_*.png)
-  outputs/robustez_fator3_va_* -> teste opcional: Fator 3 com valor adicionado por empregado (seção 5)
 
 ARQUIVOS NECESSÁRIOS NA PASTA
-  ibovespa_2024.csv (obrigatório) · ajustes_manuais.csv (opcional, Fator 1)
+  ibovespa_2024.csv (obrigatório) · ajustes_manuais_fator1.csv (opcional, Fator 1)
   dados_cvm/ e cache_cvm/ (opcional: arquivos da CVM já baixados; se não existirem, o código baixa)
 
 OBSERVAÇÃO
@@ -82,7 +81,7 @@ F1_ANOS = list(range(2017, 2024))                                     # 2017, 20
 F1_PESOS = {"graduacao": 1, "mba": 1, "mestrado": 2, "doutorado": 3}  # pontos de cada nível de formação
 F1_TOP_N = 10                                                         # quantas empresas mostrar no terminal
 F1_N_SELECAO = 10                                                     # entram as 10 maiores notas, como nos Fatores 2 e 3
-F1_ARQ_AJUSTES = "ajustes_manuais.csv"                                # correções feitas à mão (opcional)
+F1_ARQ_AJUSTES = "ajustes_manuais_fator1.csv"                              # correções feitas à mão (opcional)
 F1_PASTA_ZIPS = Path("dados_cvm")                                     # onde ficam os arquivos baixados
 F1_SAIDA = PASTA_OUTPUTS / "fator1_ranking_escolaridade_ceo.xlsx"
 F1_URL = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/FRE/DADOS/fre_cia_aberta_{ano}.zip"
@@ -453,6 +452,15 @@ F3_PERIODO = [2022, 2023]          # anos analisados; o indicador final é a mé
 F3_MIN_EMPREGADOS = 100            # empresas com menos empregados ficam sem nota
 F3_MIN_SETOR = 3                   # setor com menos empresas válidas fica sem índice naquele ano
 F3_TOP_N = 10                      # quantas empresas entram na carteira
+
+# Exclusões do Fator 3 (decisão do responsável pelo fator).
+# Holding com receita CONSOLIDADA (soma das controladas) e empregados só da HOLDING: a divisão
+# receita / empregados não mede a produtividade do trabalho e gera um outlier extremo.
+# A empresa sai do cálculo inteiro: não recebe índice e não entra na mediana do seu setor.
+F3_EXCLUIR = {
+    "CSAN3": "Cosan: holding (consolida Rumo, Compass e Moove); receita consolidada ÷ ~140 empregados da holding; "
+             "índice 21,7, mais que o dobro do 2º colocado",
+}
 F3_PASTA_CACHE = Path("cache_cvm")
 F3_ARQ_EMPREGADOS_MANUAL = Path("empregados_manual.csv")   # opcional: colunas ticker, ano, empregados
 
@@ -771,11 +779,13 @@ def calcular_ano(ano, mapa):
 
     Empresas com menos de F3_MIN_EMPREGADOS, receita não positiva ou dado ausente ficam
     sem produtividade. Setores com menos de F3_MIN_SETOR empresas válidas ficam sem índice.
+    Empresas em F3_EXCLUIR também ficam sem produtividade (e, portanto, fora da mediana do setor).
     """
     b = montar_base(ano, mapa)
+    b["excluida"] = b["ticker"].isin(F3_EXCLUIR)                          # holdings/outliers (ver F3_EXCLUIR)
 
     empregados_validos = b["empregados"].where(b["empregados"] >= F3_MIN_EMPREGADOS)
-    receita_valida = b["receita"].where(b["receita"] > 0)
+    receita_valida = b["receita"].where((b["receita"] > 0) & ~b["excluida"])
     b["produtividade"] = receita_valida / empregados_validos
 
     b["mediana_produtividade_setor"], b["empresas_validas_setor"] = calcular_mediana_setorial(b)
@@ -848,6 +858,8 @@ def rodar_fator3(ibov):
     """Roda o Fator 3 inteiro. Saída: lista dos 10 tickers selecionados + arquivos em outputs/."""
     print("\n" + "=" * 100 + "\nFATOR 3 — CAPITAL HUMANO (PRODUTIVIDADE)\n" + "=" * 100)
     conferir_universo_fator3(ibov)
+    for ticker, motivo in F3_EXCLUIR.items():
+        print(f"[EXCLUÍDA] {ticker}: {motivo}")
     por_ano, media = calcular_periodo(F3_PERIODO)       # coleta, indicador por ano e média
     top = tabela_top(media)                             # tabela de resultados
     salvar(por_ano, "fator3_produtividade_por_ano")
@@ -1022,6 +1034,11 @@ def rodar_carteira(fator_1, fator_2, fator_3):
     tabela.to_csv("carteira_resultados.csv")
     pd.DataFrame(series).to_csv("carteira_evolucao.csv")
 
+    # retorno de cada ação no período (usado no slide de explicações do Fator 3)
+    retorno_acoes = (precos[todos].iloc[-1] / precos[todos].iloc[0] - 1).rename("retorno_no_periodo")
+    retorno_acoes = pd.concat([retorno_acoes, pesos], axis=1).sort_values("retorno_no_periodo")
+    retorno_acoes.to_csv("carteira_retorno_por_acao.csv", sep=";", decimal=",", encoding="utf-8-sig", index_label="ticker")
+
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -1037,141 +1054,11 @@ def rodar_carteira(fator_1, fator_2, fator_3):
     plt.savefig("carteira_drawdown.png", dpi=150)
     plt.close()
     print("\nArquivos da carteira salvos na pasta do projeto: carteira_pesos.csv, carteira_resultados.csv, "
-          "carteira_evolucao.csv, carteira_grafico.png e carteira_drawdown.png")
+          "carteira_evolucao.csv, carteira_retorno_por_acao.csv, carteira_grafico.png e carteira_drawdown.png")
 
 
 # ######################################################################################################
-# 5) TESTE DE ROBUSTEZ (OPCIONAL) — FATOR 3 COM VALOR ADICIONADO POR EMPREGADO
-#    Não altera nenhum resultado oficial: é uma análise à parte, para responder
-#    "e se o indicador do Fator 3 fosse outro?".
-#
-#    O que muda: só o numerador do indicador.
-#        oficial  -> receita (DVA 7.01) / empregados
-#        teste    -> valor adicionado total a distribuir (DVA) / empregados
-#    O valor adicionado desconta o que a empresa comprou de terceiros (insumos, serviços), então mede
-#    melhor o valor gerado pela própria empresa. Todo o resto é igual: índice em relação à mediana
-#    do setor, média de 2022–2023, top 10 com pesos iguais e a mesma comparação com o Ibovespa.
-#
-#    Observações
-#      - A conta é buscada pela DESCRIÇÃO ("Valor Adicionado Total a Distribuir"), porque bancos e
-#        seguradoras usam outra numeração na DVA (ex.: no Itaú é a conta 7.08, não a 7.07).
-#      - Viés que continua: em holdings (ex.: Cosan) o numerador é consolidado, mas o número de
-#        empregados do FRE pode ser só o da holding, o que infla o indicador.
-#    Resultados em outputs/ (nomes começam com robustez_fator3_va_).
-# ######################################################################################################
-RODAR_ROBUSTEZ = True      # mude para False para pular este teste
-
-
-@lru_cache(maxsize=None)
-def coletar_valor_adicionado(ano):
-    """
-    Mesma leitura da DVA de coletar_receita(), mas devolve o valor adicionado total a distribuir.
-    Saída: DataFrame com [cnpj, nome, receita, ano]. A coluna se chama 'receita' só para que as funções
-    do Fator 3 funcionem sem nenhuma alteração; o conteúdo é o VALOR ADICIONADO.
-    """
-    zip_dfp = baixar_zip(URL_DFP.format(ano=ano), F3_PASTA_CACHE / f"dfp_{ano}.zip")
-    partes = []
-    for escopo in ("con", "ind"):                       # consolidado e individual
-        df = ler_csv_do_zip(zip_dfp, f"DVA_{escopo}_{ano}")
-        if df is not None:
-            df["escopo"] = escopo
-            partes.append(df)
-    dva = pd.concat(partes, ignore_index=True)
-
-    dva = dva[dva["ORDEM_EXERC"].map(normalizar).str.startswith("ULT")].copy()      # exercício atual
-    escala = np.where(dva["ESCALA_MOEDA"].map(normalizar).str.startswith("MIL"), 1000, 1)
-    dva["valor"] = para_numero(dva["VL_CONTA"]) * escala                            # tudo em R$
-    dva["VERSAO"] = pd.to_numeric(dva["VERSAO"], errors="coerce")
-    dva = dva[dva["VERSAO"] == dva.groupby(["CNPJ_CIA", "escopo"])["VERSAO"].transform("max")]  # última versão
-    tem_consolidado = dva.groupby("CNPJ_CIA")["escopo"].transform(lambda s: (s == "con").any())
-    dva = dva[(dva["escopo"] == "con") | ~tem_consolidado]                          # prefere consolidado
-
-    # conta do valor adicionado total: procurada pela descrição; se houver mais de uma, fica a de nível mais alto
-    descricao = dva["DS_CONTA"].map(normalizar)
-    eh_va_total = descricao.str.contains(r"(?:VALOR|VLR) ADICIONADO TOTAL A DISTRIBUIR")
-    va = dva[eh_va_total].assign(nivel=lambda d: d["CD_CONTA"].str.count(r"\."))
-    va = va.sort_values("nivel").groupby("CNPJ_CIA")["valor"].first().rename("receita")
-    nome = dva.groupby("CNPJ_CIA")["DENOM_CIA"].first().rename("nome")
-    saida = pd.concat([nome, va], axis=1).reset_index().rename(columns={"CNPJ_CIA": "cnpj"})
-    saida["ano"] = ano
-    return saida
-
-
-def rodar_robustez_valor_adicionado(fator_1, fator_2, fator_3_oficial):
-    """Refaz o Fator 3 com valor adicionado por empregado e compara as carteiras com o Ibovespa."""
-    global coletar_receita
-    print("\n" + "=" * 100 + "\nTESTE DE ROBUSTEZ — FATOR 3 COM VALOR ADICIONADO POR EMPREGADO\n" + "=" * 100)
-
-    # --- 1. ranking: as funções do Fator 3 rodam iguais; só a fonte do numerador é trocada (e depois restaurada)
-    coletar_receita_oficial = coletar_receita
-    coletar_receita = coletar_valor_adicionado
-    try:
-        por_ano, media = calcular_periodo(F3_PERIODO)
-    finally:
-        coletar_receita = coletar_receita_oficial
-    por_ano = por_ano.rename(columns={"receita": "valor_adicionado"})
-    media = media.rename(columns={"produtividade_media": "va_por_empregado_medio"})
-    top = tabela_top(media)
-    fator_3_va = top["Ticker"].tolist()
-
-    por_ano.to_csv(PASTA_OUTPUTS / "robustez_fator3_va_por_ano.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
-    media.to_csv(PASTA_OUTPUTS / "robustez_fator3_va_periodo.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
-    top.to_csv(PASTA_OUTPUTS / "robustez_fator3_va_top10.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
-
-    print(f"\nTop {F3_TOP_N} por valor adicionado por empregado:")
-    print(top.to_string(index=False))
-    print("\nComparação com o Fator 3 oficial (receita por empregado):")
-    print("  saem :", sorted(set(fator_3_oficial) - set(fator_3_va)))
-    print("  entram:", sorted(set(fator_3_va) - set(fator_3_oficial)))
-    print("  ficam :", sorted(set(fator_3_va) & set(fator_3_oficial)))
-
-    # --- 2. carteiras: mesmas regras da seção 4 (pesos iguais, 1/3 por fator, compra e mantém)
-    _, _, p3_oficial, comb_oficial = montar_carteira_combinada(fator_1, fator_2, fator_3_oficial)
-    _, _, p3_va, comb_va = montar_carteira_combinada(fator_1, fator_2, fator_3_va)
-    precos = carregar_precos(sorted(set(fator_1 + fator_2 + fator_3_oficial + fator_3_va)))
-    faltando = precos.columns[precos.iloc[0].isna()]
-    if len(faltando) > 0:
-        print("ATENÇÃO: sem preço em 28/03:", list(faltando))
-
-    series = {
-        "Fator 3 oficial (receita)": valor_da_carteira(precos, p3_oficial),
-        "Fator 3 valor adicionado": valor_da_carteira(precos, p3_va),
-        "Combinada oficial": valor_da_carteira(precos, comb_oficial),
-        "Combinada com F3 valor adicionado": valor_da_carteira(precos, comb_va),
-        "Ibovespa": precos["IBOV"] / precos["IBOV"].iloc[0],
-    }
-    tabela = pd.DataFrame({nome: {"Retorno acumulado": retorno_acumulado(s),
-                                  "Volatilidade anualizada": volatilidade_anual(s),
-                                  "Sharpe": sharpe(s),
-                                  "Drawdown máximo": drawdown_maximo(s)} for nome, s in series.items()})
-    print("\n", tabela.round(4).to_string())
-
-    # retorno de cada ação do Fator 3 (oficial e alternativo), para ver quem puxou o resultado
-    acoes = sorted(set(fator_3_oficial + fator_3_va))
-    retorno_acoes = (precos[acoes].iloc[-1] / precos[acoes].iloc[0] - 1).sort_values()
-    por_acao = pd.DataFrame({"retorno_no_periodo": retorno_acoes,
-                             "no_fator3_oficial": retorno_acoes.index.isin(fator_3_oficial),
-                             "no_fator3_valor_adicionado": retorno_acoes.index.isin(fator_3_va)})
-    print("\nRetorno de cada ação (28/03/2024 a 01/07/2026):")
-    print(por_acao.round(3).to_string())
-
-    tabela.to_csv(PASTA_OUTPUTS / "robustez_fator3_va_resultados.csv", sep=";", decimal=",", encoding="utf-8-sig")
-    pd.DataFrame(series).to_csv(PASTA_OUTPUTS / "robustez_fator3_va_evolucao.csv", sep=";", decimal=",", encoding="utf-8-sig")
-    por_acao.to_csv(PASTA_OUTPUTS / "robustez_fator3_va_retorno_por_acao.csv", sep=";", decimal=",", encoding="utf-8-sig")
-
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    pd.DataFrame(series).plot(figsize=(10, 5), title="Teste de robustez: Fator 3 por receita vs por valor adicionado")
-    plt.ylabel("Valor da carteira (base 1,00 em 28/03/2024)")
-    plt.tight_layout()
-    plt.savefig(PASTA_OUTPUTS / "robustez_fator3_va_grafico.png", dpi=150)
-    plt.close()
-    print(f"\nArquivos do teste de robustez salvos em {PASTA_OUTPUTS.resolve()} (robustez_fator3_va_*)")
-
-
-# ######################################################################################################
-# EXECUÇÃO: roda os três fatores, a carteira e (opcional) o teste de robustez
+# EXECUÇÃO: roda os três fatores e depois a carteira
 # ######################################################################################################
 def main():
     PASTA_OUTPUTS.mkdir(exist_ok=True)
@@ -1180,8 +1067,6 @@ def main():
     fator_2 = rodar_fator2(ibov)
     fator_3 = rodar_fator3(ibov)
     rodar_carteira(fator_1, fator_2, fator_3)
-    if RODAR_ROBUSTEZ:
-        rodar_robustez_valor_adicionado(fator_1, fator_2, fator_3)
 
 
 if __name__ == "__main__":
