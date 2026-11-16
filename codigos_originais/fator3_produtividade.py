@@ -6,11 +6,11 @@ Universo: carteira do Ibovespa vigente de 04/09/2023 a 29/12/2023 (86 papéis de
 Como rodar:   py hcs_produtividade.py
 Resultado:    pasta output/ (arquivos CSV, CSV para Excel pt-BR e Parquet) + tabela no terminal
 
-Indicador único: produtividade do trabalho = receita / nº de empregados.
+Indicador único: produtividade relativa = produtividade da empresa / mediana do setor.
 Fluxo, para cada ano do PERIODO:
-    montar_base()  ->  calcular_ano()  (produtividade e z-score setorial)
+    montar_base()  ->  calcular_ano()  (produtividade, mediana setorial e índice anual)
 Depois:
-    calcular_periodo()  ->  média dos anos  ->  tabela_top()  ->  salvar()
+    calcular_periodo()  ->  média dos índices anuais  ->  tabela_top()  ->  salvar()
 """
 import re
 import unicodedata
@@ -27,7 +27,7 @@ import requests
 # =============================================================================
 PERIODO = [2022, 2023]          # anos analisados; o indicador final é a média entre eles
 MIN_EMPREGADOS = 100            # empresas com menos empregados ficam sem nota
-MIN_SETOR = 3                   # setor com menos empresas válidas usa o z-score do universo inteiro
+MIN_SETOR = 3                   # setor com menos empresas válidas fica sem índice naquele ano
 TOP_N = 10                      # quantas empresas entram na tabela de resultados
 PASTA_CACHE = Path("cache_cvm")
 PASTA_SAIDA = Path("output")
@@ -306,85 +306,80 @@ def montar_base(ano, mapa):
 # =============================================================================
 # 2) INDICADOR DE PRODUTIVIDADE
 # =============================================================================
-def winsorizar(serie):
-    """Entrada: Series.  Saída: Series com extremos cortados nos percentis 1% e 99% (precisa de 5+ valores)."""
-    if serie.notna().sum() < 5:
-        return serie
-    return serie.clip(serie.quantile(0.01), serie.quantile(0.99))
-
-
-def zscore_setorial(df, coluna):
+def calcular_mediana_setorial(df):
     """
-    Entrada: DataFrame (com coluna 'setor') e nome da coluna numérica.
-    Saída: Series com (valor - média do setor) / desvio-padrão do setor.
-    Setores com menos de MIN_SETOR empresas válidas usam o z-score do universo inteiro,
-    porque com 2 empresas o z-score seria sempre +-0,71 e não diria nada.
+    Retorna a mediana da produtividade e a quantidade de empresas válidas de cada setor.
+    A mediana só é liberada como referência quando o setor possui pelo menos MIN_SETOR
+    empresas com produtividade válida no ano.
     """
-    grupo = df.groupby("setor")[coluna]
-    z_setor = (df[coluna] - grupo.transform("mean")) / grupo.transform("std")
-    z_universo = (df[coluna] - df[coluna].mean()) / df[coluna].std()
-    return z_setor.where(grupo.transform("count") >= MIN_SETOR, z_universo)
+    grupo = df.groupby("setor")["produtividade"]
+    quantidade = grupo.transform("count")
+    mediana = grupo.transform("median").where(quantidade >= MIN_SETOR)
+    return mediana, quantidade
 
 
 def calcular_ano(ano, mapa):
     """
-    Calcula o indicador de UM ano.
-    Entrada: ano do exercício e o dicionário {ticker: cnpj}.
-    Saída: DataFrame com [ticker, empresa, setor, ano, receita, empregados, produtividade, z_produtividade]
-        produtividade   = receita / empregados (R$ por empregado); vazia se empregados < MIN_EMPREGADOS
-        z_produtividade = z-score setorial do log da produtividade, winsorizado em 1% e 99%
+    Calcula o indicador de um ano:
+        produtividade = receita / empregados;
+        indice_produtividade = produtividade / mediana da produtividade do setor.
+
+    Empresas com menos de MIN_EMPREGADOS, receita não positiva ou dado ausente ficam
+    sem produtividade. Setores com menos de MIN_SETOR empresas válidas ficam sem índice.
     """
     b = montar_base(ano, mapa)
-    b.loc[b["empregados"] < MIN_EMPREGADOS, "empregados"] = np.nan          # filtro de qualidade
-    b["produtividade"] = b["receita"] / b["empregados"]
-    log_prod = np.log(b["produtividade"].where(b["produtividade"] > 0))     # log: ratio é muito assimétrico
-    b["log_produtividade"] = winsorizar(log_prod)
-    b["z_produtividade"] = zscore_setorial(b, "log_produtividade")
-    return b.drop(columns="log_produtividade")
 
+    empregados_validos = b["empregados"].where(b["empregados"] >= MIN_EMPREGADOS)
+    receita_valida = b["receita"].where(b["receita"] > 0)
+    b["produtividade"] = receita_valida / empregados_validos
+
+    b["mediana_produtividade_setor"], b["empresas_validas_setor"] = calcular_mediana_setorial(b)
+    b["indice_produtividade"] = b["produtividade"] / b["mediana_produtividade_setor"]
+    return b
 
 # =============================================================================
 # 3) PERÍODO E RANKING
 # =============================================================================
 def calcular_periodo(anos):
     """
-    Roda o indicador para cada ano e tira a média.
-    Entrada: lista de anos (ex.: [2022, 2023]).
-    Saída: dois DataFrames
-        por_ano: resultado de calcular_ano para cada ano, empilhado
-        media:   uma linha por ticker com produtividade_media (R$/empregado), z_produtividade_medio
-                 (média dos z-scores dos anos com dado), anos_com_dado e ranking (1 = maior produtividade)
+    Calcula cada ano e tira a média dos índices anuais disponíveis.
+    Se a empresa tiver somente um ano válido, esse único índice será o indicador final.
+    A produtividade média em R$ por empregado é mantida apenas para consulta.
     """
     nomes_todos = pd.concat([coletar_receita(a) for a in anos], ignore_index=True)
-    mapa = identificar_empresas(nomes_todos)                         # ticker -> CNPJ (uma vez só)
+    mapa = identificar_empresas(nomes_todos)
     por_ano = pd.concat([calcular_ano(a, mapa) for a in anos], ignore_index=True)
-    # O nome na CVM muda com o tempo (ex.: Via -> Grupo Casas Bahia): usa o nome mais recente em todos os anos
+
+    # Usa em todos os anos o nome mais recente encontrado na CVM.
     por_ano["empresa"] = por_ano.groupby("ticker")["empresa"].transform(
         lambda nomes: nomes[nomes != "n/d"].iloc[-1] if (nomes != "n/d").any() else "n/d")
+
     grupo = por_ano.groupby(["ticker", "empresa", "setor"])
     media = pd.DataFrame({
         "produtividade_media": grupo["produtividade"].mean(),
-        "z_produtividade_medio": grupo["z_produtividade"].mean(),
-        "anos_com_dado": grupo["z_produtividade"].count(),
+        "indicador_produtividade": grupo["indice_produtividade"].mean(),
+        "anos_com_dado": grupo["indice_produtividade"].count(),
     }).reset_index()
-    media["ranking"] = media["z_produtividade_medio"].rank(ascending=False, method="min")
-    media = media.sort_values("z_produtividade_medio", ascending=False, na_position="last").reset_index(drop=True)
+
+    media["ranking"] = media["indicador_produtividade"].rank(ascending=False, method="min")
+    media = media.sort_values(
+        "indicador_produtividade", ascending=False, na_position="last"
+    ).reset_index(drop=True)
     return por_ano, media
 
 
 def tabela_top(media, n=TOP_N):
     """
-    Monta a tabela de resultados no formato do trabalho.
-    Entrada: DataFrame 'media' de calcular_periodo e a quantidade de empresas (n).
-    Saída: DataFrame com [Posição, Empresa, Ticker, Indicador], só com as n maiores notas
-           (Indicador = z-score setorial médio da produtividade; empresas sem nota ficam de fora).
+    Retorna as n maiores notas válidas.
+    Exemplo: indicador 1,20 significa produtividade 20% acima da mediana do setor.
     """
-    top = media.dropna(subset=["z_produtividade_medio"]).head(n)
-    return pd.DataFrame({"Posição": range(1, len(top) + 1),
-                         "Empresa": top["empresa"].values,
-                         "Ticker": top["ticker"].values,
-                         "Indicador": top["z_produtividade_medio"].round(3).values})
-
+    top = media.dropna(subset=["indicador_produtividade"]).head(n)
+    return pd.DataFrame({
+        "Posição": range(1, len(top) + 1),
+        "Empresa": top["empresa"].values,
+        "Ticker": top["ticker"].values,
+        "Indicador": top["indicador_produtividade"].round(3).values,
+    })
 
 # =============================================================================
 # 4) SAÍDA
@@ -412,7 +407,7 @@ if __name__ == "__main__":
     salvar(media, "produtividade_periodo")
     salvar(top, "top10")
     pd.set_option("display.width", 250, "display.max_columns", 30)
-    print("\n===== PRODUTIVIDADE MÉDIA DO PERÍODO =====")
+    print("\n===== INDICADOR DE PRODUTIVIDADE DO PERÍODO =====")
     print(media.round(3).to_string(index=False))
     print(f"\n===== TOP {TOP_N} (tabela de resultados) =====")
     print(top.to_string(index=False))

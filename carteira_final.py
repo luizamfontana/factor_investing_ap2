@@ -5,9 +5,9 @@ Programação para Análise de Dados (Python) · Prof. Laerte Takeuti · 2026.2
 Grupo: Davi Pepe, João Marcos Zanetti e Luiza Fontana
 
 O QUE ESTE ARQUIVO FAZ
-  Fator 1  Escolaridade do CEO   (CVM, FRE 2017–2023)          -> empresas com nota >= 4,0
+  Fator 1  Escolaridade do CEO   (CVM, FRE 2017–2023)          -> 10 maiores notas
   Fator 2  Baixa volatilidade     (Yahoo Finance, jan/22–dez/23) -> 10 ações menos voláteis
-  Fator 3  Capital humano         (CVM, DFP + FRE, 2022–2023)    -> 10 maiores notas de produtividade
+  Fator 3  Capital humano         (CVM, DFP + FRE, 2022–2023)    -> 10 maiores índices de produtividade vs mediana do setor
   Carteira Cada fator com 1/3 do capital, formada em 28/03/2024 e comparada ao Ibovespa até 01/07/2026
 
 UNIVERSO (igual para os três fatores)
@@ -20,6 +20,7 @@ COMO RODAR (na pasta do projeto, no VS Code)
 ONDE FICAM OS RESULTADOS
   outputs/      -> resultados de cada fator (o nome do arquivo começa com fator1_, fator2_ ou fator3_)
   pasta raiz    -> resultados da carteira final (carteira_*.csv e carteira_*.png)
+  outputs/robustez_fator3_va_* -> teste opcional: Fator 3 com valor adicionado por empregado (seção 5)
 
 ARQUIVOS NECESSÁRIOS NA PASTA
   ibovespa_2024.csv (obrigatório) · ajustes_manuais.csv (opcional, Fator 1)
@@ -75,12 +76,12 @@ def carregar_universo():
 #      3. Ler o currículo de cada CEO e dar pontos pela formação:
 #             graduação = 1 | MBA ou especialização = 1 | mestrado = 2 | doutorado = 3   (máximo 7)
 #      4. Nota da empresa em cada ano = média dos CEOs daquele ano.  Nota final = média dos anos.
-#      5. Ordenar as empresas pela nota final. Entram na carteira as empresas com nota >= 4,0.
+#      5. Ordenar as empresas pela nota final. Entram na carteira as 10 maiores notas.
 # ######################################################################################################
 F1_ANOS = list(range(2017, 2024))                                     # 2017, 2018, ..., 2023
 F1_PESOS = {"graduacao": 1, "mba": 1, "mestrado": 2, "doutorado": 3}  # pontos de cada nível de formação
 F1_TOP_N = 10                                                         # quantas empresas mostrar no terminal
-F1_N_SELECAO = 10                                                  # corte decidido pelo grupo (8 empresas)
+F1_N_SELECAO = 10                                                     # entram as 10 maiores notas, como nos Fatores 2 e 3
 F1_ARQ_AJUSTES = "ajustes_manuais.csv"                                # correções feitas à mão (opcional)
 F1_PASTA_ZIPS = Path("dados_cvm")                                     # onde ficam os arquivos baixados
 F1_SAIDA = PASTA_OUTPUTS / "fator1_ranking_escolaridade_ceo.xlsx"
@@ -242,7 +243,7 @@ def pontuar_empresas(tabela, anos, pesos):
 # ----------------------------------------------------------------------------------------------------
 def rodar_fator1(ibov):
     """Roda o Fator 1 inteiro. Entrada: universo (ibovespa_2024.csv).
-    Saída: lista de tickers selecionados (nota >= 4,0) + arquivos em outputs/."""
+    Saída: lista dos 10 tickers selecionados + arquivos em outputs/."""
     print("\n" + "=" * 100 + "\nFATOR 1 — ESCOLARIDADE DO CEO\n" + "=" * 100)
 
     # --- 1. dados de entrada
@@ -293,10 +294,11 @@ def rodar_fator1(ibov):
         doutorado=("doutorado", "max"), nota_pessoa=("nota_pessoa", "max")).reset_index()
     revisar = ceos_por_empresa[ceos_por_empresa["nota_pessoa"] == 0]
 
-    # --- 7. seleção da carteira: as 10 maiores notas entre as empresas válidas (mesmo número dos Fatores 2 e 3)    #        Empresa com dois tickers (ex.: PETR3 e PETR4) entra com um só, o de TICKER_PRINCIPAL.
+    # --- 7. seleção da carteira: as 10 maiores notas entre as empresas válidas (mesmo número dos Fatores 2 e 3)
+    #        Empresa com dois tickers (ex.: PETR3 e PETR4) entra com um só, o de TICKER_PRINCIPAL.
     selecionadas = ranking[ranking["valida"]].sort_values("posicao").head(F1_N_SELECAO).copy()
     selecionadas["ticker_carteira"] = [TICKER_PRINCIPAL.get(emp, t.split(", ")[0])
-        for emp, t in zip(selecionadas.index, selecionadas["ticker"])]
+                                       for emp, t in zip(selecionadas.index, selecionadas["ticker"])]
 
     # --- 8. gravar os resultados
     with pd.ExcelWriter(F1_SAIDA) as arquivo:
@@ -438,16 +440,18 @@ def rodar_fator2(ibov):
 # 3) FATOR 3 — CAPITAL HUMANO (PRODUTIVIDADE DO TRABALHO)
 #    Critério: 2022 e 2023 | Fonte: CVM (DFP: receita na DVA; FRE: número de empregados)
 #
-#    Indicador único: produtividade do trabalho = receita / nº de empregados.
+#    Indicador único: produtividade relativa = produtividade da empresa / mediana do setor.
+#        produtividade = receita (DVA 7.01) / nº de empregados (FRE 10.1A)
+#        índice 1,20 = produtividade 20% acima da mediana do setor
 #    Fluxo, para cada ano do PERIODO:
-#        montar_base()  ->  calcular_ano()  (produtividade e z-score setorial)
+#        montar_base()  ->  calcular_ano()  (produtividade, mediana setorial e índice anual)
 #    Depois:
-#        calcular_periodo()  ->  média dos anos  ->  tabela_top()  ->  salvar()
+#        calcular_periodo()  ->  média dos índices anuais  ->  tabela_top()  ->  salvar()
 #    Universo: o mesmo ibovespa_2024.csv, um ticker por empresa (ações ON/PN da mesma empresa contam uma vez).
 # ######################################################################################################
 F3_PERIODO = [2022, 2023]          # anos analisados; o indicador final é a média entre eles
 F3_MIN_EMPREGADOS = 100            # empresas com menos empregados ficam sem nota
-F3_MIN_SETOR = 3                   # setor com menos empresas válidas usa o z-score do universo inteiro
+F3_MIN_SETOR = 3                   # setor com menos empresas válidas fica sem índice naquele ano
 F3_TOP_N = 10                      # quantas empresas entram na carteira
 F3_PASTA_CACHE = Path("cache_cvm")
 F3_ARQ_EMPREGADOS_MANUAL = Path("empregados_manual.csv")   # opcional: colunas ticker, ano, empregados
@@ -747,41 +751,36 @@ def montar_base(ano, mapa):
 # ----------------------------------------------------------------------------------------------------
 # 3.3 Indicador de produtividade
 # ----------------------------------------------------------------------------------------------------
-def winsorizar(serie):
-    """Entrada: Series.  Saída: Series com extremos cortados nos percentis 1% e 99% (precisa de 5+ valores)."""
-    if serie.notna().sum() < 5:
-        return serie
-    return serie.clip(serie.quantile(0.01), serie.quantile(0.99))
-
-
-def zscore_setorial(df, coluna):
+def calcular_mediana_setorial(df):
     """
-    Entrada: DataFrame (com coluna 'setor') e nome da coluna numérica.
-    Saída: Series com (valor - média do setor) / desvio-padrão do setor.
-    Setores com menos de F3_MIN_SETOR empresas válidas usam o z-score do universo inteiro,
-    porque com 2 empresas o z-score seria sempre +-0,71 e não diria nada.
+    Retorna a mediana da produtividade e a quantidade de empresas válidas de cada setor.
+    A mediana só é liberada como referência quando o setor possui pelo menos F3_MIN_SETOR
+    empresas com produtividade válida no ano.
     """
-    grupo = df.groupby("setor")[coluna]
-    z_setor = (df[coluna] - grupo.transform("mean")) / grupo.transform("std")
-    z_universo = (df[coluna] - df[coluna].mean()) / df[coluna].std()
-    return z_setor.where(grupo.transform("count") >= F3_MIN_SETOR, z_universo)
+    grupo = df.groupby("setor")["produtividade"]
+    quantidade = grupo.transform("count")
+    mediana = grupo.transform("median").where(quantidade >= F3_MIN_SETOR)
+    return mediana, quantidade
 
 
 def calcular_ano(ano, mapa):
     """
-    Calcula o indicador de UM ano.
-    Entrada: ano do exercício e o dicionário {ticker: cnpj}.
-    Saída: DataFrame com [ticker, empresa, setor, ano, receita, empregados, produtividade, z_produtividade]
-        produtividade   = receita / empregados (R$ por empregado); vazia se empregados < F3_MIN_EMPREGADOS
-        z_produtividade = z-score setorial do log da produtividade, winsorizado em 1% e 99%
+    Calcula o indicador de um ano:
+        produtividade = receita / empregados;
+        indice_produtividade = produtividade / mediana da produtividade do setor.
+
+    Empresas com menos de F3_MIN_EMPREGADOS, receita não positiva ou dado ausente ficam
+    sem produtividade. Setores com menos de F3_MIN_SETOR empresas válidas ficam sem índice.
     """
     b = montar_base(ano, mapa)
-    b.loc[b["empregados"] < F3_MIN_EMPREGADOS, "empregados"] = np.nan       # filtro de qualidade
-    b["produtividade"] = b["receita"] / b["empregados"]
-    log_prod = np.log(b["produtividade"].where(b["produtividade"] > 0))     # log: ratio é muito assimétrico
-    b["log_produtividade"] = winsorizar(log_prod)
-    b["z_produtividade"] = zscore_setorial(b, "log_produtividade")
-    return b.drop(columns="log_produtividade")
+
+    empregados_validos = b["empregados"].where(b["empregados"] >= F3_MIN_EMPREGADOS)
+    receita_valida = b["receita"].where(b["receita"] > 0)
+    b["produtividade"] = receita_valida / empregados_validos
+
+    b["mediana_produtividade_setor"], b["empresas_validas_setor"] = calcular_mediana_setorial(b)
+    b["indice_produtividade"] = b["produtividade"] / b["mediana_produtividade_setor"]
+    return b
 
 
 # ----------------------------------------------------------------------------------------------------
@@ -789,42 +788,44 @@ def calcular_ano(ano, mapa):
 # ----------------------------------------------------------------------------------------------------
 def calcular_periodo(anos):
     """
-    Roda o indicador para cada ano e tira a média.
-    Entrada: lista de anos (ex.: [2022, 2023]).
-    Saída: dois DataFrames
-        por_ano: resultado de calcular_ano para cada ano, empilhado
-        media:   uma linha por ticker com produtividade_media (R$/empregado), z_produtividade_medio
-                 (média dos z-scores dos anos com dado), anos_com_dado e ranking (1 = maior produtividade)
+    Calcula cada ano e tira a média dos índices anuais disponíveis.
+    Se a empresa tiver somente um ano válido, esse único índice será o indicador final.
+    A produtividade média em R$ por empregado é mantida apenas para consulta.
     """
     nomes_todos = pd.concat([coletar_receita(a) for a in anos], ignore_index=True)
     mapa = identificar_empresas(nomes_todos)                         # ticker -> CNPJ (uma vez só)
     por_ano = pd.concat([calcular_ano(a, mapa) for a in anos], ignore_index=True)
-    # O nome na CVM muda com o tempo (ex.: Via -> Grupo Casas Bahia): usa o nome mais recente em todos os anos
+
+    # Usa em todos os anos o nome mais recente encontrado na CVM (ex.: Via -> Grupo Casas Bahia).
     por_ano["empresa"] = por_ano.groupby("ticker")["empresa"].transform(
         lambda nomes: nomes[nomes != "n/d"].iloc[-1] if (nomes != "n/d").any() else "n/d")
+
     grupo = por_ano.groupby(["ticker", "empresa", "setor"])
     media = pd.DataFrame({
         "produtividade_media": grupo["produtividade"].mean(),
-        "z_produtividade_medio": grupo["z_produtividade"].mean(),
-        "anos_com_dado": grupo["z_produtividade"].count(),
+        "indicador_produtividade": grupo["indice_produtividade"].mean(),
+        "anos_com_dado": grupo["indice_produtividade"].count(),
     }).reset_index()
-    media["ranking"] = media["z_produtividade_medio"].rank(ascending=False, method="min")
-    media = media.sort_values("z_produtividade_medio", ascending=False, na_position="last").reset_index(drop=True)
+
+    media["ranking"] = media["indicador_produtividade"].rank(ascending=False, method="min")
+    media = media.sort_values(
+        "indicador_produtividade", ascending=False, na_position="last"
+    ).reset_index(drop=True)
     return por_ano, media
 
 
 def tabela_top(media, n=F3_TOP_N):
     """
-    Monta a tabela de resultados no formato do trabalho.
-    Entrada: DataFrame 'media' de calcular_periodo e a quantidade de empresas (n).
-    Saída: DataFrame com [Posição, Empresa, Ticker, Indicador], só com as n maiores notas
-           (Indicador = z-score setorial médio da produtividade; empresas sem nota ficam de fora).
+    Retorna as n maiores notas válidas.
+    Exemplo: indicador 1,20 significa produtividade 20% acima da mediana do setor.
     """
-    top = media.dropna(subset=["z_produtividade_medio"]).head(n)
-    return pd.DataFrame({"Posição": range(1, len(top) + 1),
-                         "Empresa": top["empresa"].values,
-                         "Ticker": top["ticker"].values,
-                         "Indicador": top["z_produtividade_medio"].round(3).values})
+    top = media.dropna(subset=["indicador_produtividade"]).head(n)
+    return pd.DataFrame({
+        "Posição": range(1, len(top) + 1),
+        "Empresa": top["empresa"].values,
+        "Ticker": top["ticker"].values,
+        "Indicador": top["indicador_produtividade"].round(3).values,
+    })
 
 
 # ----------------------------------------------------------------------------------------------------
@@ -853,7 +854,7 @@ def rodar_fator3(ibov):
     salvar(media, "fator3_produtividade_periodo")
     salvar(top, "fator3_top10")
     pd.set_option("display.width", 250, "display.max_columns", 30)
-    print("\n===== PRODUTIVIDADE MÉDIA DO PERÍODO =====")
+    print("\n===== INDICADOR DE PRODUTIVIDADE DO PERÍODO =====")
     print(media.round(3).to_string(index=False))
     print(f"\n===== TOP {F3_TOP_N} (tabela de resultados) =====")
     print(top.to_string(index=False))
@@ -1048,8 +1049,8 @@ def rodar_carteira(fator_1, fator_2, fator_3):
 #        oficial  -> receita (DVA 7.01) / empregados
 #        teste    -> valor adicionado total a distribuir (DVA) / empregados
 #    O valor adicionado desconta o que a empresa comprou de terceiros (insumos, serviços), então mede
-#    melhor o valor gerado pela própria empresa. Todo o resto é igual: log, winsorização, z-score
-#    setorial, média de 2022–2023, top 10 com pesos iguais e a mesma comparação com o Ibovespa.
+#    melhor o valor gerado pela própria empresa. Todo o resto é igual: índice em relação à mediana
+#    do setor, média de 2022–2023, top 10 com pesos iguais e a mesma comparação com o Ibovespa.
 #
 #    Observações
 #      - A conta é buscada pela DESCRIÇÃO ("Valor Adicionado Total a Distribuir"), porque bancos e
