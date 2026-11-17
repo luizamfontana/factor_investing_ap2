@@ -15,7 +15,7 @@ UNIVERSO (igual para os três fatores)
 
 COMO RODAR (na pasta do projeto, no VS Code)
   pip install pandas numpy requests yfinance matplotlib openpyxl pyarrow
-  python factor_investing.py
+  python carteira_final.py
 
 ONDE FICAM OS RESULTADOS
   outputs/      -> resultados de cada fator (o nome do arquivo começa com fator1_, fator2_ ou fator3_)
@@ -29,6 +29,8 @@ OBSERVAÇÃO
   Os métodos de cada fator são os mesmos dos códigos originais (ceo_escolaridade.py, factor_low_vol.py,
   webscrapping.py e carteira.py, guardados em codigos_originais/). A única mudança de conteúdo é o
   universo: todos os fatores agora usam o mesmo ibovespa_2024.csv.
+  Fator 2: o filtro de histórico completo passou a olhar só a janela do critério (2022–2023), sem dados
+  posteriores à formação; quem mudou de ticker usa o histórico do ticker novo (TICKER_NOVO_YAHOO).
 """
 import io
 import os
@@ -54,6 +56,24 @@ DATA_FIM = "2026-07-01"                 # fim da comparação com o Ibovespa
 # Empresas com mais de um ticker no Ibovespa: a nota é da empresa, então entra um ticker só (o mais líquido).
 # Vale para os Fatores 1 e 3 (o Fator 2 trabalha com preços, ticker a ticker, como no código original).
 TICKER_PRINCIPAL = {"Petrobras": "PETR4", "Bradesco": "BBDC4", "Eletrobras": "ELET3"}
+
+# Ticker que mudou depois da formação (mesma empresa, código novo): se o Yahoo não tiver preço no ticker
+# antigo, usa o novo. Vale para o Fator 2 (janela do critério) e para a carteira (seção 4).
+# Empresas compradas por outra ou que fecharam o capital (BRFS3, SOMA3, CIEL3, CRFB3) não entram aqui:
+# o ticker da compradora seria o preço de outra empresa.
+TICKER_NOVO_YAHOO = {
+    "ELET3": "AXIA3",   # Eletrobras mudou de nome e ticker em 10/11/2025; o Yahoo só tem o histórico sob AXIA3
+    "ELET6": "AXIA6",
+    "CPLE6": "CPLE3",   # Copel unificou as classes de ações; o CPLE6 deixou de ter cotação no Yahoo
+    "MRFG3": "MBRF3",   # Marfrig incorporou a BRF em 2025 e passou a negociar como MBRF3
+    "TRPL4": "ISAE4",   # ISA CTEEP virou ISA Energia Brasil e mudou de ticker
+    "CCRO3": "MOTV3",   # CCR virou Motiva
+    "EMBR3": "EMBJ3",   # Embraer mudou de ticker
+    "ARZZ3": "AZZA3",   # Arezzo incorporou o Grupo Soma e virou Azzas 2154
+    "NTCO3": "NATU3",   # Natura &Co foi incorporada pela Natura
+    "RRRP3": "BRAV3",   # 3R Petroleum virou Brava Energia
+    "PETZ3": "AUAU3",   # Petz (fusão com a Cobasi): conferir se o histórico é mesmo o da Petz
+}
 
 
 def carregar_universo():
@@ -319,121 +339,94 @@ def rodar_fator1(ibov):
 #    Critério: jan/2022 a dez/2023 | Fonte: Yahoo Finance (preços ajustados a dividendos)
 #
 #    IDEIA
-#      1. Baixar os preços diários de todos os tickers do universo.
-#      2. Manter só quem tem histórico completo (dropna): exclui quem saiu da bolsa ou mudou de ticker.
-#      3. Volatilidade anualizada de 2022–2023 = desvio padrão dos retornos diários × √252.
-#      4. Entram as 10 ações MENOS voláteis, com pesos iguais.
-#    Obs.: o código original também mede a carteira até 01/01/2026 (CAGR e Sharpe com taxa livre de 10,5%).
-#          Essas métricas foram mantidas como output próprio do Fator 2; a comparação oficial com o
-#          Ibovespa é a da seção 4 (Carteira).
+#      1. Baixar os preços diários de todos os tickers do universo, SÓ na janela do critério (2022–2023).
+#      2. Se o Yahoo não tiver o histórico no ticker antigo, usar o ticker novo da mesma empresa
+#         (TICKER_NOVO_YAHOO, seção 0). Empresas compradas ou que fecharam o capital não têm ticker novo.
+#      3. Manter só quem tem histórico completo em 2022–2023 (dropna).
+#      4. Volatilidade anualizada de 2022–2023 = desvio padrão dos retornos diários × √252.
+#      5. Entram as 10 ações MENOS voláteis, com pesos iguais.
+#    Obs.: a versão anterior exigia preços completos até dez/2025. Isso usava informação posterior à
+#          formação (quem ainda existiria em 2025) e excluía quem saiu da bolsa depois de 28/03/2024.
+#          Agora a seleção usa só dados disponíveis na formação. A avaliação é a da seção 4 (Carteira),
+#          igual para todos os fatores: 28/03/2024 a 01/07/2026.
 # ######################################################################################################
-F2_INICIO_IN_SAMPLE = "2022-01-01"     # início da coleta de dados e formação
-F2_FIM_IN_SAMPLE = "2023-12-31"        # fim da formação / início do teste
-F2_FIM_OUT_OF_SAMPLE = "2026-01-01"    # fim do teste do código original
+F2_INICIO_IN_SAMPLE = "2022-01-01"     # início da janela do critério
+F2_FIM_IN_SAMPLE = "2023-12-31"        # fim da janela do critério (nenhum dado depois disso entra na seleção)
 F2_TOP_N = 10
-F2_RISK_FREE = 0.105
 
 
-def run_low_vol_factor(tickers, inicio_in_sample, fim_in_sample, fim_out_of_sample, top_n=10, risk_free_rate=0.105):
-    """
-    Executa o backtest do Fator de Baixa Volatilidade com separação estrita de janelas temporais.
-    Saída: lista das ações selecionadas, métricas do próprio fator e o ranking completo de volatilidade.
-    """
+def baixar_precos_criterio(tickers, inicio, fim):
+    """Baixa o fechamento ajustado da janela do critério. Entrada: tickers sem '.SA'.
+    Saída: (DataFrame com uma coluna por ticker do universo, dicionário ticker -> série usada no Yahoo)."""
     import yfinance as yf
-    print(f"1. Baixando dados de {inicio_in_sample} até {fim_out_of_sample}...")
+    fim_exclusivo = (pd.Timestamp(fim) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")   # o 'end' do Yahoo não inclui o dia
+    novos = [TICKER_NOVO_YAHOO[t] for t in tickers if t in TICKER_NOVO_YAHOO]
+    simbolos = [t + ".SA" for t in sorted(set(tickers) | set(novos))]
+    bruto = yf.download(simbolos, start=inicio, end=fim_exclusivo, auto_adjust=True)["Close"]
+    bruto.columns = [str(c).replace(".SA", "") for c in bruto.columns]
+    bruto = bruto.reindex(columns=[s.replace(".SA", "") for s in simbolos])
 
-    # Extração de Dados (auto_adjust=True garante que dividendos não distorçam a volatilidade)
-    dados = yf.download(tickers, start=inicio_in_sample, end=fim_out_of_sample, auto_adjust=True)['Close']
+    dados, serie_usada = {}, {}
+    for t in tickers:
+        if bruto[t].notna().sum() == 0 and t in TICKER_NOVO_YAHOO and bruto[TICKER_NOVO_YAHOO[t]].notna().sum() > 0:
+            serie_usada[t] = TICKER_NOVO_YAHOO[t]          # ex.: ELET3 sem preço -> histórico de AXIA3
+        else:
+            serie_usada[t] = t
+        dados[t] = bruto[serie_usada[t]]
+    return pd.DataFrame(dados), serie_usada
 
-    # Limpeza: remove ações que não têm o histórico completo nesses 4 anos
-    dados = dados.dropna(axis=1)
-    print(f"   Tickers com histórico completo: {dados.shape[1]} de {len(tickers)}")
-    retornos = dados.pct_change().dropna()
 
-    # Divisão das Janelas (In-Sample vs Out-of-Sample)
-    # .loc fatia o DataFrame exatamente nas datas estipuladas
-    retornos_in_sample = retornos.loc[:fim_in_sample]
-    retornos_out_of_sample = retornos.loc[fim_in_sample:]
+def run_low_vol_factor(tickers, inicio_in_sample, fim_in_sample, top_n=10):
+    """
+    Seleção do Fator de Baixa Volatilidade usando só a janela do critério.
+    Saída: lista das ações selecionadas, ranking completo de volatilidade e a série usada para cada ticker.
+    """
+    print(f"1. Baixando dados de {inicio_in_sample} até {fim_in_sample}...")
+    dados, serie_usada = baixar_precos_criterio(tickers, inicio_in_sample, fim_in_sample)
+    trocas = {t: s for t, s in serie_usada.items() if s != t and dados[t].notna().any()}
+    for antigo, novo in trocas.items():
+        print(f"   [AVISO] {antigo} sem preço no Yahoo: usando o histórico de {novo}")
 
-    # ==========================================
-    # ETAPA DE FORMAÇÃO (IN-SAMPLE: 2022 - 2023)
-    # ==========================================
-    print("2. Calculando volatilidade e ranqueando as empresas (In-Sample)...")
+    # Limpeza: remove ações sem histórico completo na janela do critério
+    completos = dados.dropna(axis=1)
+    fora = sorted(set(tickers) - set(completos.columns))
+    print(f"   Tickers com histórico completo em 2022–2023: {completos.shape[1]} de {len(tickers)}")
+    print(f"   Fora (sem preço completo no Yahoo): {fora}")
+    retornos = completos.pct_change().dropna()
 
-    # Calcula a volatilidade anualizada baseada em 2 anos de pregões diários
-    vol_anualizada_in_sample = retornos_in_sample.std() * np.sqrt(252)
-
-    # Cria o Ranking: Ordena do MENOR risco para o MAIOR risco
-    ranking_low_vol = vol_anualizada_in_sample.sort_values(ascending=True)
-
-    # Seleciona as N ações menos voláteis
+    print("2. Calculando volatilidade e ranqueando as empresas...")
+    vol_anualizada = retornos.std() * np.sqrt(252)                  # volatilidade anualizada de 2022–2023
+    ranking_low_vol = vol_anualizada.sort_values(ascending=True)    # do MENOR para o MAIOR risco
     carteira_selecionada = ranking_low_vol.head(top_n).index.tolist()
-
-    # ==========================================
-    # ETAPA DE TESTE (OUT-OF-SAMPLE: 2024 - 2026)
-    # ==========================================
-    print("3. Testando o portfólio no mundo real (Out-of-Sample)...")
-
-    # Isola os retornos apenas das 10 ações selecionadas no período de teste
-    retornos_carteira_oos = retornos_out_of_sample[carteira_selecionada]
-
-    # Calcula o retorno diário do portfólio (Pesos iguais = 10% para cada ação)
-    retorno_diario_portfolio = retornos_carteira_oos.mean(axis=1)
-
-    # Métricas Finais do Portfólio (2024 e 2025)
-    retorno_acumulado = (1 + retorno_diario_portfolio).cumprod().iloc[-1] - 1
-
-    # Ajuste dinâmico de anos (caso o pregão tenha menos de 252 dias úteis no período)
-    anos_oos = len(retorno_diario_portfolio) / 252
-    cagr = (1 + retorno_acumulado) ** (1 / anos_oos) - 1
-
-    # Volatilidade e Sharpe do período de teste
-    vol_portfolio = retorno_diario_portfolio.std() * np.sqrt(252)
-    sharpe = (cagr - risk_free_rate) / vol_portfolio
-
-    metricas = {
-        'Retorno Acumulado (%)': round(retorno_acumulado * 100, 2),
-        'Retorno Anualizado - CAGR (%)': round(cagr * 100, 2),
-        'Volatilidade Anualizada (%)': round(vol_portfolio * 100, 2),
-        'Índice Sharpe': round(sharpe, 2)
-    }
-
-    return carteira_selecionada, metricas, ranking_low_vol
+    return carteira_selecionada, ranking_low_vol, serie_usada
 
 
 def rodar_fator2(ibov):
     """Roda o Fator 2 com os tickers do ibovespa_2024.csv.
-    Saída: lista de tickers selecionados (sem '.SA') + arquivos em outputs/."""
+    Saída: lista de tickers selecionados + arquivos em outputs/."""
     print("\n" + "=" * 100 + "\nFATOR 2 — BAIXA VOLATILIDADE\n" + "=" * 100)
-    tickers_ibovespa = [t + ".SA" for t in ibov["ticker"].unique()]   # mesmo universo dos outros fatores (87 tickers)
+    tickers_ibovespa = ibov["ticker"].unique().tolist()   # mesmo universo dos outros fatores (87 tickers)
 
-    acoes_vencedoras, resultados, ranking = run_low_vol_factor(
+    selecionadas, ranking, serie_usada = run_low_vol_factor(
         tickers=tickers_ibovespa,
         inicio_in_sample=F2_INICIO_IN_SAMPLE,
         fim_in_sample=F2_FIM_IN_SAMPLE,
-        fim_out_of_sample=F2_FIM_OUT_OF_SAMPLE,
         top_n=F2_TOP_N,
-        risk_free_rate=F2_RISK_FREE,
     )
-    selecionadas = [acao.replace(".SA", "") for acao in acoes_vencedoras]
 
     # --- gravar os resultados
     tabela = ranking.rename("volatilidade_anual_2022_2023").reset_index()
     tabela.columns = ["ticker", "volatilidade_anual_2022_2023"]
-    tabela["ticker"] = tabela["ticker"].str.replace(".SA", "", regex=False)
     tabela.insert(0, "posicao", range(1, len(tabela) + 1))
+    tabela["serie_yahoo"] = tabela["ticker"].map(serie_usada)
     tabela["selecionada"] = tabela["ticker"].isin(selecionadas)
     tabela.to_csv(PASTA_OUTPUTS / "fator2_ranking_volatilidade.csv", index=False, sep=";", decimal=",", encoding="utf-8-sig")
     pd.DataFrame({"ticker": selecionadas}).to_csv(PASTA_OUTPUTS / "fator2_selecionadas.csv", index=False, encoding="utf-8-sig")
-    pd.Series(resultados, name="valor").to_csv(PASTA_OUTPUTS / "fator2_metricas_proprias_ate_2025.csv", sep=";", decimal=",", encoding="utf-8-sig")
 
     print("\n-> AS 10 AÇÕES SELECIONADAS (Com base em 2022-2023):")
-    print(selecionadas)
-    print("\n-> DESEMPENHO DA CARTEIRA (No período de 2024-2025, métricas do código original):")
-    for metrica, valor in resultados.items():
-        print(f"{metrica}: {valor}")
+    print(tabela.head(F2_TOP_N + 5).to_string(index=False))
+    print(f"Arquivos salvos em {PASTA_OUTPUTS.resolve()}")
     return selecionadas
-
 
 # ######################################################################################################
 # 3) FATOR 3 — CAPITAL HUMANO (PRODUTIVIDADE DO TRABALHO)
@@ -887,14 +880,7 @@ def rodar_fator3(ibov):
 # ######################################################################################################
 DIAS_ANO = 252                 # pregões por ano
 
-# Ticker que mudou depois da formação: se o Yahoo não tiver preço no ticker antigo, usa o novo.
-TICKER_NOVO_YAHOO = {
-    "ELET3": "AXIA3",   # Eletrobras mudou de nome e ticker em 10/11/2025; o Yahoo só tem o histórico sob AXIA3
-    "ELET6": "AXIA6",
-    "CPLE6": "CPLE3",   # Copel unificou as classes de ações; o CPLE6 deixou de ter cotação no Yahoo
-    "MRFG3": "MBRF3",   # Marfrig incorporou a BRF em 2025 e passou a negociar como MBRF3
-    "TRPL4": "ISAE4",   # ISA CTEEP virou ISA Energia Brasil e mudou de ticker
-}
+# TICKER_NOVO_YAHOO fica na seção 0 (usado também pelo Fator 2).
 
 
 # ----------------------------------------------------------------------------------------------------
@@ -929,9 +915,13 @@ def baixar_yahoo(tickers):
 def carregar_precos(tickers):
     """Lê precos.csv se existir; senão baixa do Yahoo (preços ajustados por dividendos).
     precos.csv: coluna Date + uma coluna por ticker SEM '.SA' + coluna IBOV."""
+    usar_csv = False
     if os.path.exists("precos.csv"):
         df = pd.read_csv("precos.csv", index_col="Date", parse_dates=True)
-    else:
+        usar_csv = all(t in df.columns for t in tickers + ["IBOV"])
+        if not usar_csv:
+            print("[AVISO] precos.csv não tem todos os tickers da carteira: baixando do Yahoo")
+    if not usar_csv:
         import yfinance as yf
         df = baixar_yahoo(tickers)
         ibov = yf.download("^BVSP", start="2024-03-20", end="2026-07-03", auto_adjust=True)["Close"]
@@ -945,6 +935,13 @@ def carregar_precos(tickers):
                 df[antigo] = novos[novo]
                 print(f"[AVISO] {antigo} sem preço no Yahoo: usando o histórico de {novo}")
     df = df.sort_index().loc[DATA_FORMACAO:DATA_FIM]
+    df = df.dropna(subset=["IBOV"])                     # só pregões da B3
+    # ação que deixou de ser negociada no meio do período: o valor fica parado no último preço (vira caixa)
+    for t in tickers:
+        ultimo = df[t].last_valid_index() if t in df else None
+        if ultimo is not None and ultimo < df.index[-1]:
+            print(f"[AVISO] {t}: último preço em {ultimo.date()}; daí em diante o valor fica parado")
+    df = df.ffill()
     return df
 
 
